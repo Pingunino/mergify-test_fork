@@ -1,4 +1,4 @@
-# HITL helper v2 for anom-000-03 (Mergify OIDC CI token scope confinement).
+# HITL helper v3 (orchestrator fix: add-mask to stderr so $(idtok) returns only the JWT) for anom-000-03 (Mergify OIDC CI token scope confinement).
 # Commit as .github/workflows/mergify-oidc-probe.yml in BlackPointSystem/mergify-test
 # (replace the v1 file if it is there), then Actions tab -> "mergify-oidc-probe" -> Run workflow
 # on branch main with the default inputs. The trust policy it needs already exists on
@@ -43,7 +43,7 @@ jobs:
             local u="$ACTIONS_ID_TOKEN_REQUEST_URL"
             if [ -n "$1" ]; then u="$u&audience=$(jq -rn --arg a "$1" '$a|@uri')"; fi
             local t; t=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$u" | jq -r .value)
-            echo "::add-mask::$t"; printf '%s' "$t"
+            echo "::add-mask::$t" >&2; printf '%s' "$t"
           }
           claims() { printf '%s' "$1" | cut -d. -f2 | tr '_-' '/+' | { b=$(cat); while [ $(( ${#b} % 4 )) -ne 0 ]; do b="$b="; done; printf '%s' "$b"; } | base64 -d 2>/dev/null | jq -c '{aud,repository,repository_id,repository_owner,repository_owner_id,ref,event_name,workflow_ref,job_workflow_ref,environment,repository_visibility}' 2>/dev/null; }
           CI_TOK=""
