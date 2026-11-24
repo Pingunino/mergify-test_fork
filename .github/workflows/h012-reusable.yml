@@ -1,0 +1,22 @@
+# anom-006-01 helper (hunt-agent-012). Commit as .github/workflows/h012-reusable.yml in BlackPointSystem/mergify-test.
+# Prints ONLY the exchange status code, error_code and the job_workflow_ref claim (not secret). The token is never printed.
+name: h012-reusable
+on:
+  workflow_call: {}
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  xchg:
+    runs-on: ubuntu-latest
+    steps:
+      - name: exchange
+        run: |
+          set -u
+          curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https%3A%2F%2Fapi.mergify.com" | jq -r .value > /tmp/idt
+          echo "::add-mask::$(cat /tmp/idt)"
+          cut -d. -f2 /tmp/idt | tr '_-' '/+' | { b=$(cat); while [ $(( ${#b} % 4 )) -ne 0 ]; do b="$b="; done; printf '%s' "$b"; } | base64 -d 2>/dev/null | jq -c '{ref,workflow_ref,job_workflow_ref,job_workflow_sha,event_name}'
+          code=$(curl -sS -o /tmp/x.json -w '%{http_code}' -X POST https://api.mergify.com/v1/ci/oidc/exchange -H 'content-type: application/json' --data "{\"id_token\":\"$(cat /tmp/idt)\"}")
+          [ "$code" = 200 ] && echo "::add-mask::$(jq -r .token /tmp/x.json)"
+          echo "EXCHANGE -> $code $(jq -c '{error_code,detail}' /tmp/x.json 2>/dev/null | cut -c1-300)"
+          rm -f /tmp/idt /tmp/x.json
