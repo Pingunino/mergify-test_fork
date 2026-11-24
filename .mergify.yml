@@ -1,0 +1,14 @@
+# HITL-013 (anom-011-01) runtime template-rendering probe — security research on own test repo
+pull_request_rules:
+  - name: h011 ssti probe a
+    conditions:
+      - base=main
+    actions:
+      comment:
+        message: "h011a m1={{ 7*7 }} m2={{ title }} m3={{ title.__class__ }}"
+  - name: h011 ssti probe b
+    conditions:
+      - base=main
+    actions:
+      comment:
+        message: "h011b m4={{ nosuch }}"
