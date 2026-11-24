@@ -1,0 +1,10 @@
+# anom-006-01 helper (hunt-agent-012). Commit as .github/workflows/h012-caller.yml in BlackPointSystem/mergify-test.
+name: h012-caller
+on:
+  workflow_dispatch: {}
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  call:
+    uses: ./.github/workflows/h012-reusable.yml
